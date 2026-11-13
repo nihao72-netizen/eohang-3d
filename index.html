@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>어항 알갱이 보기</title>
+<style>
+  :root{
+    --bg:#0b0f14; --panel:rgba(11,15,20,.9); --line:#1e293b; --text:#e2e8f0; --dim:#64748b;
+    --accent:#7dd3fc; --ok:#86efac; --okmark:#22c55e; --bad:#fca5a5; --badmark:#ef4444; --run:#eab308;
+    --btn:#1e293b; --btnhover:#334155; --btnline:#334155;
+  }
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);overflow:hidden;
+    font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",sans-serif}
+  #c{display:block;width:100%;height:100%;touch-action:none}
+  .panel{position:fixed;background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:12px 14px;font-size:12.5px;line-height:1.65;backdrop-filter:blur(6px)}
+  #hud{left:16px;top:16px;max-width:min(340px,calc(100vw - 32px))}
+  #hud h1{margin:0 0 6px;font-size:14px;color:var(--accent);font-weight:600}
+  #steps{margin:0;padding:0;list-style:none}
+  #steps li{padding:1px 0;color:var(--dim)}
+  #steps li::before{content:"    ";white-space:pre;font-family:ui-monospace,Consolas,monospace}
+  #steps li.run::before{content:".. ";color:var(--run)}
+  #steps li.ok{color:var(--ok)}
+  #steps li.ok::before{content:"OK ";color:var(--okmark);font-weight:700}
+  #steps li.bad{color:var(--bad)}
+  #steps li.bad::before{content:"X  ";color:var(--badmark);font-weight:700}
+  #stats{margin:8px 0 0;display:grid;grid-template-columns:auto 1fr;gap:0 10px}
+  #stats dt{color:var(--dim)} #stats dd{margin:0;font-variant-numeric:tabular-nums}
+  #err{margin-top:10px;padding:10px;border-radius:8px;background:#2a1215;border:1px solid #7f1d1d;
+    color:#fecaca;display:none;white-space:pre-wrap}
+  #err.show{display:block}
+  #ctl{right:16px;top:16px;text-align:right}
+  button{background:var(--btn);color:var(--text);border:1px solid var(--btnline);border-radius:8px;
+    padding:6px 11px;font-size:12px;cursor:pointer;margin:2px;font-family:inherit}
+  button:hover{background:var(--btnhover)}
+  button.on{background:#0369a1;border-color:#0ea5e9}
+  .hint{color:var(--dim);font-size:11.5px;margin-top:4px}
+  @media (max-width:600px){
+    #hud{top:auto;bottom:16px}
+    #ctl{left:16px;right:16px;text-align:left}
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div class="panel" id="hud">
+  <h1>어항 알갱이 보기</h1>
+  <ul id="steps">
+    <li id="s-lib">라이브러리 불러오기</li>
+    <li id="s-renderer">렌더러 넣기</li>
+    <li id="s-fetch">파일 받기</li>
+    <li id="s-decode">알갱이로 풀기</li>
+    <li id="s-measure">크기 재기</li>
+  </ul>
+  <dl id="stats">
+    <dt>파일</dt><dd id="v-file">-</dd>
+    <dt>파일 크기</dt><dd id="v-size">-</dd>
+    <dt>받은 시간</dt><dd id="v-time">-</dd>
+    <dt>알갱이</dt><dd id="v-count">-</dd>
+  </dl>
+  <div id="err"></div>
+</div>
+
+<div class="panel" id="ctl">
+  <button id="b-fit">화면에 맞추기</button><button id="b-flip">위아래 뒤집기</button>
+  <div class="hint">끌기: 돌리기 · 휠: 확대 · 오른쪽 끌기: 옮기기</div>
+</div>
+
+<script type="importmap">
+{"imports":{
+  "three":"https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+  "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+  "@sparkjsdev/spark":"https://sparkjs.dev/releases/spark/2.4.0/spark.module.js"
+}}
+</script>
+<script type="module">
+/* ============ 여기서 파일 이름을 바꾼다 ============ */
+const SPLAT_FILE = "scene.sog";   // 같은 폴더의 .sog / .ply / .spz / .splat
+/* ================================================== */
+
+// 확장자와 Spark 안쪽 형식 이름이 다르다. .sog 는 "pcsogszip" 이다.
+const FILE_TYPE = { sog: "pcsogszip", ply: "ply", spz: "spz", splat: "splat", ksplat: "ksplat" };
+
+const $ = id => document.getElementById(id);
+const step = (id, state, text) => { const li = $(id); li.className = state; if (text) li.textContent = text; };
+const fmtInt = n => n.toLocaleString("ko-KR");
+function fail(id, msg) {
+  if (id) step(id, "bad");
+  const e = $("err"); e.classList.add("show"); e.textContent = msg;
+}
+addEventListener("unhandledrejection", e => fail(null, "처리 못 한 오류: " + (e.reason?.message ?? e.reason)));
+
+// 1. 라이브러리 불러오기
+step("s-lib", "run");
+let THREE, OrbitControls, SPARK;
+try {
+  THREE = await import("three");
+  ({ OrbitControls } = await import("three/addons/controls/OrbitControls.js"));
+  SPARK = await import("@sparkjsdev/spark");
+  step("s-lib", "ok", `라이브러리 불러오기 (three r${THREE.REVISION}, Spark 2.4.0)`);
+} catch (e) {
+  fail("s-lib", "three.js 나 Spark 를 못 불러왔습니다. 인터넷 연결을 확인하세요.\n" + e.message);
+  throw e;
+}
+
+const renderer = new THREE.WebGLRenderer({ canvas: $("c"), antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0f14);
+const camera = new THREE.PerspectiveCamera(55, 1, 0.01, 1000);
+camera.position.set(2, 1, 2);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+function resize() {
+  renderer.setSize(innerWidth, innerHeight, false);
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+}
+addEventListener("resize", resize); resize();
+
+// 2. 렌더러 넣기: SparkRenderer 를 장면에 넣지 않으면 오류 없이 화면이 까맣다
+step("s-renderer", "run");
+const spark = new SPARK.SparkRenderer({ renderer });
+scene.add(spark);
+step("s-renderer", "ok");
+
+(function loop() {
+  requestAnimationFrame(loop);
+  controls.update();
+  renderer.render(scene, camera);
+})();
+
+// 3. 파일 받기
+step("s-fetch", "run");
+$("v-file").textContent = SPLAT_FILE;
+let bytes;
+try {
+  const t0 = performance.now();
+  const r = await fetch(SPLAT_FILE);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  bytes = new Uint8Array(await r.arrayBuffer());
+  const secs = (performance.now() - t0) / 1000;
+  $("v-size").textContent = `${fmtInt(bytes.byteLength)}바이트 (${(bytes.byteLength / 1e6).toFixed(1)}MB)`;
+  $("v-time").textContent = `${secs.toFixed(2)}초`;
+  step("s-fetch", "ok");
+} catch (e) {
+  fail("s-fetch", `"${SPLAT_FILE}" 를 못 받았습니다: ${e.message}\n` +
+    "파일이 같은 폴더에 있는지, file:// 이 아니라 로컬 서버(http://)로 열었는지 확인하세요.");
+  throw e;
+}
+
+// 4. 알갱이로 풀기
+step("s-decode", "run");
+let mesh;
+try {
+  const ext = SPLAT_FILE.split(".").pop().toLowerCase();
+  const fileType = FILE_TYPE[ext];
+  if (!fileType) throw new Error(`모르는 확장자: .${ext}`);
+  const t0 = performance.now();
+  mesh = new SPARK.SplatMesh({ fileBytes: bytes, fileType, fileName: SPLAT_FILE });
+  scene.add(mesh);
+  await mesh.initialized;
+  const n = mesh.numSplats ?? mesh.splats?.getNumSplats?.() ?? 0;
+  if (!n) throw new Error("알갱이가 0개입니다");
+  $("v-count").textContent = `${fmtInt(n)}개`;
+  step("s-decode", "ok", `알갱이로 풀기 (${((performance.now() - t0) / 1000).toFixed(2)}초)`);
+} catch (e) {
+  fail("s-decode", "파일은 받았지만 알갱이로 풀지 못했습니다: " + e.message);
+  throw e;
+}
+
+// 5. 크기 재기: Box3.setFromObject 는 SplatMesh 에 빈 상자를 준다. Spark 의 getBoundingBox 를 쓴다
+let localBox;
+step("s-measure", "run");
+try {
+  localBox = mesh.getBoundingBox(true);
+  if (localBox.isEmpty()) throw new Error("빈 상자");
+} catch (e) {
+  fail("s-measure", "크기를 재지 못했습니다: " + e.message + "\n카메라를 임의 위치에 두었습니다.");
+}
+
+function fit() {
+  if (!localBox) return;
+  mesh.updateMatrixWorld(true);
+  const box = localBox.clone().applyMatrix4(mesh.matrixWorld);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const radius = size.length() / 2;
+  const dist = radius / Math.sin(THREE.MathUtils.degToRad(camera.fov / 2)) * 0.9;
+  const dir = new THREE.Vector3(0.0, 0.25, 1).normalize();   // 정면에서 조금 위
+  controls.target.copy(center);
+  camera.position.copy(center).addScaledVector(dir, dist);
+  camera.near = Math.max(radius / 500, 0.001);
+  camera.far = radius * 50;
+  camera.updateProjectionMatrix();
+  controls.minDistance = radius * 0.02;
+  controls.maxDistance = radius * 10;
+  controls.update();
+  step("s-measure", "ok",
+    `크기 재기 (${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)})`);
+}
+fit();
+
+// 위아래 뒤집기: x 축으로 180도 돌리면 y 와 z 의 부호가 함께 바뀐다
+let flipped = false;
+$("b-flip").onclick = e => {
+  flipped = !flipped;
+  mesh.rotation.x = flipped ? Math.PI : 0;
+  e.currentTarget.classList.toggle("on", flipped);
+  fit();
+};
+$("b-fit").onclick = fit;
+
+window.viewer = { THREE, SPARK, scene, camera, controls, renderer, spark, mesh, fit };
+</script>
+</body>
+</html>
