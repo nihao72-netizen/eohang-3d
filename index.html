@@ -26,7 +26,7 @@
   #steps li.bad{color:var(--bad)}
   #steps li.bad::before{content:"X  ";color:var(--badmark);font-weight:700}
   #stats{margin:8px 0 0;display:grid;grid-template-columns:auto 1fr;gap:0 10px}
-  #stats dt{color:var(--dim)} #stats dd{margin:0;font-variant-numeric:tabular-nums}
+  #stats dt{color:var(--dim)} #stats dd{margin:0;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
   #err{margin-top:10px;padding:10px;border-radius:8px;background:#2a1215;border:1px solid #7f1d1d;
     color:#fecaca;display:none;white-space:pre-wrap}
   #err.show{display:block}
@@ -35,10 +35,24 @@
     padding:6px 11px;font-size:12px;cursor:pointer;margin:2px;font-family:inherit}
   button:hover{background:var(--btnhover)}
   button.on{background:#0369a1;border-color:#0ea5e9}
+  button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   .hint{color:var(--dim);font-size:11.5px;margin-top:4px}
+  #cmp{right:16px;bottom:16px;max-width:min(560px,calc(100vw - 32px));max-height:40vh;overflow:auto}
+  #cmp h2{margin:0 0 4px;font-size:13px;color:var(--accent);font-weight:600}
+  #cmp table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+  #cmp th,#cmp td{padding:2px 8px;text-align:right;white-space:nowrap;border-bottom:1px solid var(--line)}
+  #cmp th:first-child,#cmp td:first-child{text-align:left;white-space:normal;overflow-wrap:anywhere}
+  #cmp th{color:var(--dim);font-weight:500}
+  #cmp tr.cur td{color:var(--ok)}
+  #cmp tr.bad td{color:var(--bad)}
+  #cmp .empty{color:var(--dim)}
+  #drop{position:fixed;inset:0;display:none;align-items:center;justify-content:center;pointer-events:none;
+    background:rgba(3,105,161,.18);border:3px dashed #0ea5e9;font-size:18px;color:var(--text)}
+  #drop.show{display:flex}
   @media (max-width:600px){
     #hud{top:auto;bottom:16px}
     #ctl{left:16px;right:16px;text-align:left}
+    #cmp{display:none}
   }
 </style>
 </head>
@@ -59,14 +73,27 @@
     <dt>파일 크기</dt><dd id="v-size">-</dd>
     <dt>받은 시간</dt><dd id="v-time">-</dd>
     <dt>알갱이</dt><dd id="v-count">-</dd>
+    <dt>푸는 시간</dt><dd id="v-decode">-</dd>
   </dl>
   <div id="err"></div>
 </div>
 
 <div class="panel" id="ctl">
-  <button id="b-fit">화면에 맞추기</button><button id="b-flip">위아래 뒤집기</button>
+  <button id="b-fit">화면에 맞추기</button><button id="b-flip">위아래 뒤집기</button><button id="b-open">파일 열기</button>
+  <input type="file" id="picker" accept=".sog,.ply,.spz,.splat,.ksplat" hidden>
   <div class="hint">끌기: 돌리기 · 휠: 확대 · 오른쪽 끌기: 옮기기</div>
+  <div class="hint">.ply · .compressed.ply · .sog · .spz 파일을 끌어다 놓으면 바꿔 봅니다</div>
 </div>
+
+<div class="panel" id="cmp">
+  <h2>형식 비교</h2>
+  <table>
+    <thead><tr><th>파일</th><th>크기 (바이트)</th><th>알갱이</th><th>푸는 시간</th></tr></thead>
+    <tbody id="cmp-body"><tr><td class="empty" colspan="4">아직 연 파일이 없습니다</td></tr></tbody>
+  </table>
+</div>
+
+<div id="drop">여기에 놓으면 이 파일로 바꿔 봅니다</div>
 
 <script type="importmap">
 {"imports":{
@@ -77,19 +104,32 @@
 </script>
 <script type="module">
 /* ============ 여기서 파일 이름을 바꾼다 ============ */
-const SPLAT_FILE = "scene.sog";   // 같은 폴더의 .sog / .ply / .spz / .splat
+const SPLAT_FILE = "scene.sog";   // 같은 폴더의 .sog / .ply / .compressed.ply / .spz / .splat
 /* ================================================== */
 
-// 확장자와 Spark 안쪽 형식 이름이 다르다. .sog 는 "pcsogszip" 이다.
-const FILE_TYPE = { sog: "pcsogszip", ply: "ply", spz: "spz", splat: "splat", ksplat: "ksplat" };
+// 확장자 → Spark 2.4.0 형식 이름. 확장자와 다르므로 그대로 넘기면 안 된다.
+// .compressed.ply 는 PLY 안에 압축 칸을 둔 것이라 Spark 에서는 "ply" 로 읽는다.
+const FILE_TYPE = {
+  "compressed.ply": "ply",
+  ply: "ply",
+  sog: "pcsogszip",
+  spz: "spz",
+  splat: "splat",
+  ksplat: "ksplat",
+};
+function fileTypeOf(name) {
+  const lower = name.toLowerCase();
+  const key = Object.keys(FILE_TYPE).find(ext => lower.endsWith("." + ext));
+  return key ? { ext: key, type: FILE_TYPE[key] } : null;
+}
 
 const $ = id => document.getElementById(id);
 const step = (id, state, text) => { const li = $(id); li.className = state; if (text) li.textContent = text; };
 const fmtInt = n => n.toLocaleString("ko-KR");
-function fail(id, msg) {
-  if (id) step(id, "bad");
-  const e = $("err"); e.classList.add("show"); e.textContent = msg;
-}
+const fmtSize = b => `${fmtInt(b)}바이트 (${(b / 1e6).toFixed(1)}MB)`;
+function showError(msg) { const e = $("err"); e.classList.add("show"); e.textContent = msg; }
+function clearError() { const e = $("err"); e.classList.remove("show"); e.textContent = ""; }
+function fail(id, msg) { if (id) step(id, "bad"); showError(msg); }
 addEventListener("unhandledrejection", e => fail(null, "처리 못 한 오류: " + (e.reason?.message ?? e.reason)));
 
 // 1. 라이브러리 불러오기
@@ -134,62 +174,86 @@ step("s-renderer", "ok");
   renderer.render(scene, camera);
 })();
 
-// 3. 파일 받기
-step("s-fetch", "run");
-$("v-file").textContent = SPLAT_FILE;
-let bytes;
-try {
-  const t0 = performance.now();
-  const r = await fetch(SPLAT_FILE);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  bytes = new Uint8Array(await r.arrayBuffer());
-  const secs = (performance.now() - t0) / 1000;
-  $("v-size").textContent = `${fmtInt(bytes.byteLength)}바이트 (${(bytes.byteLength / 1e6).toFixed(1)}MB)`;
-  $("v-time").textContent = `${secs.toFixed(2)}초`;
-  step("s-fetch", "ok");
-} catch (e) {
-  fail("s-fetch", `"${SPLAT_FILE}" 를 못 받았습니다: ${e.message}\n` +
-    "파일이 같은 폴더에 있는지, file:// 이 아니라 로컬 서버(http://)로 열었는지 확인하세요.");
-  throw e;
+let mesh = null, localBox = null, flipped = false, loadToken = 0;
+const results = [];   // 비교표에 쌓는 기록
+
+function renderTable() {
+  const body = $("cmp-body");
+  body.replaceChildren();
+  if (!results.length) {
+    const tr = body.insertRow(); const td = tr.insertCell();
+    td.colSpan = 4; td.className = "empty"; td.textContent = "아직 연 파일이 없습니다";
+    return;
+  }
+  results.forEach((r, i) => {
+    const tr = body.insertRow();
+    if (r.error) tr.className = "bad"; else if (i === results.length - 1) tr.className = "cur";
+    const cells = r.error
+      ? [r.name, fmtInt(r.size), "실패", r.error]
+      : [r.name, fmtInt(r.size), fmtInt(r.count), `${r.decodeSec.toFixed(2)}초`];
+    for (const v of cells) tr.insertCell().textContent = v;
+  });
 }
 
-// 4. 알갱이로 풀기
-step("s-decode", "run");
-let mesh;
-try {
-  const ext = SPLAT_FILE.split(".").pop().toLowerCase();
-  const fileType = FILE_TYPE[ext];
-  if (!fileType) throw new Error(`모르는 확장자: .${ext}`);
-  const t0 = performance.now();
-  mesh = new SPARK.SplatMesh({ fileBytes: bytes, fileType, fileName: SPLAT_FILE });
-  scene.add(mesh);
-  await mesh.initialized;
-  const n = mesh.numSplats ?? mesh.splats?.getNumSplats?.() ?? 0;
-  if (!n) throw new Error("알갱이가 0개입니다");
-  $("v-count").textContent = `${fmtInt(n)}개`;
-  step("s-decode", "ok", `알갱이로 풀기 (${((performance.now() - t0) / 1000).toFixed(2)}초)`);
-} catch (e) {
-  fail("s-decode", "파일은 받았지만 알갱이로 풀지 못했습니다: " + e.message);
-  throw e;
+// 4. 알갱이로 풀기 (처음 파일과 끌어다 놓은 파일이 같은 길로 간다)
+async function showSplats(bytes, name, { fitCamera }) {
+  const token = ++loadToken;
+  clearError();
+  $("v-file").textContent = name;
+  $("v-size").textContent = fmtSize(bytes.byteLength);
+  $("v-count").textContent = "-"; $("v-decode").textContent = "-";
+  step("s-decode", "run", "알갱이로 풀기");
+  const ft = fileTypeOf(name);
+  let next;
+  try {
+    if (!ft) throw new Error(`모르는 확장자입니다: ${name}`);
+    const t0 = performance.now();
+    next = new SPARK.SplatMesh({ fileBytes: bytes, fileType: ft.type, fileName: name });
+    await next.initialized;
+    const decodeSec = (performance.now() - t0) / 1000;
+    if (token !== loadToken) { next.dispose?.(); return; }   // 그사이 다른 파일을 놓았다
+    const count = next.numSplats ?? next.splats?.getNumSplats?.() ?? 0;
+    if (!count) throw new Error("알갱이가 0개입니다");
+
+    if (mesh) { scene.remove(mesh); mesh.dispose?.(); }
+    mesh = next;
+    mesh.rotation.x = flipped ? Math.PI : 0;
+    scene.add(mesh);
+
+    $("v-count").textContent = `${fmtInt(count)}개`;
+    $("v-decode").textContent = `${decodeSec.toFixed(2)}초`;
+    step("s-decode", "ok", `알갱이로 풀기 (${ft.type})`);
+    results.push({ name, size: bytes.byteLength, count, decodeSec, type: ft.type });
+    renderTable();
+
+    // 5. 크기 재기: Box3.setFromObject 는 SplatMesh 에 빈 상자를 준다. Spark 의 getBoundingBox 를 쓴다
+    step("s-measure", "run");
+    localBox = mesh.getBoundingBox(true);
+    if (localBox.isEmpty()) { localBox = null; throw new Error("크기를 재지 못했습니다"); }
+    if (fitCamera) fit(); else showSize();
+  } catch (e) {
+    next?.dispose?.();
+    if (token !== loadToken) return;
+    results.push({ name, size: bytes.byteLength, error: e.message });
+    renderTable();
+    fail("s-decode", `"${name}" 를 알갱이로 풀지 못했습니다: ${e.message}` +
+      (mesh ? "\n앞서 보던 장면을 그대로 둡니다." : ""));
+  }
 }
 
-// 5. 크기 재기: Box3.setFromObject 는 SplatMesh 에 빈 상자를 준다. Spark 의 getBoundingBox 를 쓴다
-let localBox;
-step("s-measure", "run");
-try {
-  localBox = mesh.getBoundingBox(true);
-  if (localBox.isEmpty()) throw new Error("빈 상자");
-} catch (e) {
-  fail("s-measure", "크기를 재지 못했습니다: " + e.message + "\n카메라를 임의 위치에 두었습니다.");
-}
-
-function fit() {
-  if (!localBox) return;
+function worldBox() {
   mesh.updateMatrixWorld(true);
-  const box = localBox.clone().applyMatrix4(mesh.matrixWorld);
+  return localBox.clone().applyMatrix4(mesh.matrixWorld);
+}
+function showSize() {
+  const s = worldBox().getSize(new THREE.Vector3());
+  step("s-measure", "ok", `크기 재기 (${s.x.toFixed(2)} × ${s.y.toFixed(2)} × ${s.z.toFixed(2)})`);
+}
+function fit() {
+  if (!mesh || !localBox) return;
+  const box = worldBox();
   const center = box.getCenter(new THREE.Vector3());
-  const size = box.getSize(new THREE.Vector3());
-  const radius = size.length() / 2;
+  const radius = box.getSize(new THREE.Vector3()).length() / 2;
   const dist = radius / Math.sin(THREE.MathUtils.degToRad(camera.fov / 2)) * 0.9;
   const dir = new THREE.Vector3(0.0, 0.25, 1).normalize();   // 정면에서 조금 위
   controls.target.copy(center);
@@ -200,22 +264,55 @@ function fit() {
   controls.minDistance = radius * 0.02;
   controls.maxDistance = radius * 10;
   controls.update();
-  step("s-measure", "ok",
-    `크기 재기 (${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)})`);
+  showSize();
 }
-fit();
+
+// 3. 파일 받기
+step("s-fetch", "run");
+$("v-file").textContent = SPLAT_FILE;
+try {
+  const t0 = performance.now();
+  const r = await fetch(SPLAT_FILE);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const bytes = new Uint8Array(await r.arrayBuffer());
+  $("v-time").textContent = `${((performance.now() - t0) / 1000).toFixed(2)}초`;
+  step("s-fetch", "ok");
+  await showSplats(bytes, SPLAT_FILE, { fitCamera: true });
+} catch (e) {
+  fail("s-fetch", `"${SPLAT_FILE}" 를 못 받았습니다: ${e.message}\n` +
+    "파일이 같은 폴더에 있는지, file:// 이 아니라 로컬 서버(http://)로 열었는지 확인하세요.\n" +
+    "파일을 끌어다 놓아서 열 수도 있습니다.");
+}
+
+// 끌어다 놓기와 파일 열기: 같은 시점에서 견주도록 카메라는 그대로 둔다
+async function openLocalFile(file) {
+  $("v-time").textContent = "끌어다 놓음 (받기 없음)";
+  step("s-fetch", "ok", "파일 받기 (내 컴퓨터에서)");
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  await showSplats(bytes, file.name, { fitCamera: !mesh });
+}
+let dragDepth = 0;
+addEventListener("dragenter", e => { e.preventDefault(); dragDepth++; $("drop").classList.add("show"); });
+addEventListener("dragleave", e => { e.preventDefault(); if (--dragDepth <= 0) { dragDepth = 0; $("drop").classList.remove("show"); } });
+addEventListener("dragover", e => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; });
+addEventListener("drop", e => {
+  e.preventDefault(); dragDepth = 0; $("drop").classList.remove("show");
+  const file = e.dataTransfer?.files?.[0];
+  if (file) openLocalFile(file);
+});
+$("b-open").onclick = () => $("picker").click();
+$("picker").onchange = e => { const f = e.target.files?.[0]; if (f) openLocalFile(f); e.target.value = ""; };
 
 // 위아래 뒤집기: x 축으로 180도 돌리면 y 와 z 의 부호가 함께 바뀐다
-let flipped = false;
 $("b-flip").onclick = e => {
   flipped = !flipped;
-  mesh.rotation.x = flipped ? Math.PI : 0;
+  if (mesh) mesh.rotation.x = flipped ? Math.PI : 0;
   e.currentTarget.classList.toggle("on", flipped);
   fit();
 };
 $("b-fit").onclick = fit;
 
-window.viewer = { THREE, SPARK, scene, camera, controls, renderer, spark, mesh, fit };
+window.viewer = { THREE, SPARK, scene, camera, controls, renderer, spark, get mesh() { return mesh; }, fit, results, openLocalFile };
 </script>
 </body>
 </html>
